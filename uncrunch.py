@@ -41,16 +41,33 @@ def read_string(infile):
 def read_uint16(infile):
   return struct.unpack(UINT16_PACK, infile.read(UINT16_LEN))[0]
 
-def loadTextureFile(path):
+class Log(object):
+  def __init__(self, _indent=0):
+    self._indent = _indent
+  def log(self, *args):
+    sys.stdout.write("  " * self._indent)
+    sys.stdout.write("".join(args))
+    sys.stdout.write("\n")
+  def indent(self, num=1):
+    self._indent += num
+  def dedent(self, num=1):
+    self._indent -= num
+  def indented(self, num=1):
+    return Log(self._indent + num)
+  def __exit__(self, a, b, c): pass
+  def __enter__(self):
+    return self
+
+def extractBitmapData(path, log=Log()):
   buf = memoryview(open(path, 'rb').read())
-  print("loadTextureFile: read %d bytes from %s" % (len(buf), path))
+  log.log("extractBitmapData: read %d bytes from %s" % (len(buf), path))
   i = 0
   width = struct.unpack_from(INT32_PACK, buf)[0]
   height = struct.unpack_from(INT32_PACK, buf[4:8])[0]
 
-  print("loadTextureFile: %d (%x) x %d (%x)" % (width, width, height, height))
+  log.log("extractBitmapData: %d (%x) x %d (%x)" % (width, width, height, height))
 
-  print("loadTextureFile: flag byte: %x" % ord(buf[8]))
+  log.log("extractBitmapData: flag byte: %x" % ord(buf[8]))
 
   flag = ord(buf[8]) == 1 # has alpha
   i += 9
@@ -80,18 +97,55 @@ def loadTextureFile(path):
           j += 4
       pixi += rle
   except IndexError, e:
-    print("loadTextureFile: " + repr(e))
+    log.log("extractBitmapData: " + repr(e))
   except IOError, e:
-    print("loadTextureFile: " + repr(e))
+    log.log("extractBitmapData: " + repr(e))
 
   return (bitmap[0:pixi], width, height)
 
+"baz"
 
-def process(path, outdir):
-  if not (os.path.exists(path) and os.path.isdir(path)):
-    raise Exception("error: not an asset directory: " + path)
+def processDatafile(dataFile, outdir, log):
+  bitmap, bitWidth, bitHeight = extractBitmapData(dataFile, log)
 
-  metafile = path + ".meta"
+  name = os.path.splitext(dataFile)[0]
+
+  rawfile = os.path.join(outdir, name + ".raw")
+  if not os.path.exists(os.path.dirname(rawfile)):
+    os.makedirs(os.path.dirname(rawfile))
+  open(rawfile, 'wb').write(bitmap)
+  log.log("wrote texture (%dx%d) to %s" % (bitWidth, bitHeight, rawfile))
+
+  if png:
+    try:
+      pngfile = os.path.join(outdir, name + ".png")
+      png.from_array([bitmap[i*bitWidth*4:(i+1)*bitWidth*4] for i in range(bitHeight)],
+        mode='RGBA',
+        info=dict(
+          height=bitHeight,
+          width=bitWidth)).write(open(pngfile, 'wb'))
+      log.log("wrote PNG to " + pngfile)
+    except Exception, e:
+      log.log("error writing PNG: " + repr(e))
+
+"bar"
+
+def processMetafile(path, outdir, log):
+  if path.endswith(".meta"):
+    metafile = path
+    path = os.path.dirname(path)
+  else:
+    metafile = path + ".meta"
+
+  name = os.path.splitext(metafile)[0]
+  monolithicDataFile = name + ".data"
+  if os.path.exists(monolithicDataFile):
+    log.log("using monolithic datafile: " + monolithicDataFile)
+  else:
+    monolithicDataFile = None
+    if not (os.path.exists(path) and os.path.isdir(path)):
+      log.log("warning: not an asset directory: " + path)
+
   if not (os.path.exists(metafile)):
     raise Exception("error: missing metafile: " + metafile)
 
@@ -102,55 +156,51 @@ def process(path, outdir):
   infile.read(4)
   num = read_uint16(infile)
 
-  print("[" + path + "]")
+  log.log("%s (%d textures)" % (path, num))
 
   for i in range(num):
-    path3 = read_string(infile)
-    path4 = os.path.join(path, path3)
-    num2 = read_uint16(infile)
-    for j in range(num2):
-      text3 = read_string(infile).replace('\\', '/')
-      x = read_uint16(infile)
-      y = read_uint16(infile)
-      w1 = read_uint16(infile)
-      h1 = read_uint16(infile)
-      num7 = read_uint16(infile)
-      num8 = read_uint16(infile)
-      frameWidth = read_uint16(infile)
-      frameHeight = read_uint16(infile)
+    with log.indented() as log:
+      path3 = read_string(infile)
+      path4 = os.path.join(path, path3)
+      num2 = read_uint16(infile)
+      log.log("%s (%d)" % (path3, num2))
+      for j in range(num2):
+        with log.indented() as log:
+          text3 = read_string(infile).replace('\\', '/')
+          x = read_uint16(infile)
+          y = read_uint16(infile)
+          w1 = read_uint16(infile)
+          h1 = read_uint16(infile)
+          num7 = read_uint16(infile)
+          num8 = read_uint16(infile)
+          frameWidth = read_uint16(infile)
+          frameHeight = read_uint16(infile)
 
-      textureFile = os.path.join(path, text3 + ".data")
+          log.log("[%d,%d] texture %s: %dx%d@%d,%d" % (i, j, text3,
+            frameWidth, frameHeight, x, y))
 
-      print("  [%d,%d] texture %s: %d x %d" % (i, j, text3, frameWidth, frameHeight))
+          dataFile = os.path.join(path, text3 + ".data")
+          # TODO(dsandler): monolithicDataFile
 
-      bitmap, bitWidth, bitHeight = loadTextureFile(textureFile)
+          processDatafile(dataFile, outdir=outdir, log=log)
 
-      rawfile = os.path.join(outdir, text3 + ".raw")
-      if not os.path.exists(os.path.dirname(rawfile)):
-        os.makedirs(os.path.dirname(rawfile))
-      open(rawfile, 'wb').write(bitmap)
-      print("  wrote texture (%dx%d) to %s" % (bitWidth, bitHeight, rawfile))
-
-      if png:
-        try:
-          pngfile = os.path.join(outdir, text3 + ".png")
-          png.from_array([bitmap[i*bitWidth*4:(i+1)*bitWidth*4] for i in range(bitHeight)],
-            mode='RGBA',
-            info=dict(
-              height=bitHeight,
-              width=bitWidth)).write(open(pngfile, 'wb'))
-          print("wrote PNG to " + pngfile)
-        except Exception, e:
-          print("error writing PNG: " + repr(e))
+"foo"
 
 def main(argv):
   ap = argparse.ArgumentParser()
   ap.add_argument('-o', '--output', default='.', help='Output directory')
-  ap.add_argument('dirs', nargs='+')
+  ap.add_argument('targets', nargs='+')
   args = ap.parse_args()
 
-  for d in args.dirs:
-    process(d, outdir=args.output)
+  log = Log()
+
+  for d in args.targets:
+    if d.endswith(".meta") or os.path.isdir(d):
+      processMetafile(d, outdir=args.output, log=log)
+    elif d.endswith(".data"):
+      processDatafile(d, outdir=args.output, log=log)
+    else:
+      log.log("error: unrecognized file input: " + d)
 
 if __name__ == '__main__':
   sys.exit(main(sys.argv))
